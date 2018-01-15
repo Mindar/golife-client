@@ -1,88 +1,107 @@
 import { Grid } from "2dgrid";
+import GridRenderer from "./GridRenderer";
+import {ITool, IGridChange} from './tools/ITool';
+import GliderTool from './tools/GliderTool';
 
 export default class GameOfLife {
-	private ctx: CanvasRenderingContext2D;
-	private canv: HTMLCanvasElement;
 	private conn: WebSocket;
-	private h: number;
-	private w: number;
 	private grid: Grid<boolean>;
 	private commands: any[];
+	private renderer: GridRenderer;
+	private tool: ITool | undefined;
 
 	constructor(url: string, canvas: HTMLCanvasElement){
 		this.conn = new WebSocket(url);
-		this.conn.onopen = (event) => console.log('Connected');;
+		this.conn.onopen = (event) => console.log('Connected');
 		this.conn.onmessage = (event) => this.handleMsg(event);
 		this.conn.onclose = (event) => this.handleDc(event);
 		this.conn.onerror = (event) => console.error(event);
 
-		this.canv = canvas;
-		this.h = this.canv.height;
-		this.w = this.canv.width;
+		const grid = new Grid<boolean>(1, 1);
+		grid.fill(false);
+		this.grid = grid;
 
-		const tmpctx = this.canv.getContext('2d');
-		if(tmpctx === null){
-			throw new Error('Could not get context from canvas.');
-		}
-		this.ctx = tmpctx;
+		canvas.onclick = this.applyTool.bind(this);
+		canvas.onmousemove = this.moveTool.bind(this);
 
-		this.grid = new Grid(1,1);
-		this.grid.fill(false);
+		const renderer = new GridRenderer(grid, canvas);
+		this.renderer = renderer;
 
 		this.commands = [];
-
+		this.registerCommand({id: 'cmd-spawn-glider', uitext: 'Spawn Glider', onclick: this.cmdSpawnGlider.bind(this)});
 		this.registerCommand({id: 'cmd-randomize-grid', uitext: 'Randomize Grid', onclick: this.cmdRandomizeGrid.bind(this)});
 		this.registerCommand({id: 'cmd-clear-grid', uitext: 'Clear', onclick: this.cmdClearGrid.bind(this)});
 		this.draw();
 	}
 
+
+	private applyTool(e: MouseEvent): void{
+		if(this.tool === undefined) return;
+
+		const cell = this.renderer.coordToCell(e.clientX, e.clientY);
+		const changes = this.tool.apply(cell.row, cell.col, this.grid);
+
+		this.sendChanges(changes);
+		this.tool = undefined;
+	}
+
+	private moveTool(e: MouseEvent): void{
+		const cell = this.renderer.coordToCell(e.clientX, e.clientY);
+		console.log('MOUSE.');
+		console.log(cell);
+		console.log('' + e.clientX + ' ' + e.clientY);
+		console.log(document.getElementById('gamecanv').clientHeight);
+	}
+
+	private sendChanges(changes: IGridChange[]): void{
+		const data: any = {};
+		data.cmd = 'world.modify';
+		data.payload = changes;
+
+		const msg = JSON.stringify(data);
+		this.conn.send(msg);
+	}
+
+	private cmdSpawnGlider(): void {
+		/**
+		 * @todo: create method "setActiveTool" which - depending on the tool's requirements adds event handlers to onclick, mousemove, keyboard input, rendering handling, ...
+		 */
+
+		this.tool = new GliderTool();
+		// set current tool to glider tool
+	}
+
 	private cmdClearGrid(): void {
 		const msg: any = {};
-		msg.action = 'world.modify';
-		msg.changes = [];
-
-		for(let row = 0; row < this.grid.rows; row++){
-			for(let col = 0; col < this.grid.cols; col++){
-				const change: any = {};
-				change.row = row;
-				change.col = col;
-				change.val = false;
-
-				msg.changes.push(change);
-			}
-		}
-
+		msg.cmd = 'world.clear';
+		
 		const msgtxt = JSON.stringify(msg);
 		this.conn.send(msgtxt);
 	}
 
 	private cmdRandomizeGrid(): void{
+		console.log('Randomizing');
 		const aliveChance = 0.5;
-		const msg: any = {};
-		msg.action = 'world.modify';
-		msg.changes = [];
-		
+		const changes: IGridChange[] = [];
+
 		for(let row = 0; row < this.grid.rows; row++){
 			for(let col = 0; col < this.grid.cols; col++){
+				// Generate random value for this cell
 				const aliveVal = Math.random();
 				let alive = true;
 
-				// Kill if above threshold
+				// Kill if value above threshold
 				if(aliveVal > aliveChance){
 					alive = !alive;
 				}
 
-				const change: any = {};
-				change.row = row;
-				change.col = col;
-				change.val = alive;
-
-				msg.changes.push(change);
+				// add change to array
+				const change: IGridChange = {val: alive, row, col};
+				changes.push(change);
 			}
 		}
 
-		const msgtxt = JSON.stringify(msg);
-		this.conn.send(msgtxt);
+		this.sendChanges(changes);
 	}
 
 	private registerCommand(cmd: {id: string, uitext: string, onclick: any, html?: HTMLElement}): void{
@@ -106,31 +125,19 @@ export default class GameOfLife {
 	}
 
 	private draw(): void{
-
-		const pxPerRow = this.canv.height / this.grid.rows;
-		const pxPerCol = this.canv.width / this.grid.cols;
-		const w = this.canv.width;
-		const h = this.canv.height;
-
-
-		this.ctx.clearRect(0, 0, w, h);
-		this.ctx.fillStyle = "#000";
-
-		for(let row = 0; row < this.grid.rows; row++){
-			for(let col = 0; col < this.grid.cols; col++){
-				if(!this.grid.valueAt(row, col)) continue;
-				
-				const xPos = col * pxPerCol;
-				const yPos = row * pxPerRow;
-				this.ctx.fillRect(xPos, yPos, pxPerCol, pxPerRow);
-			}
+		if(this.grid !== undefined) {
+			this.renderer.render();
 		}
 
 		requestAnimationFrame(this.draw.bind(this));
 	}
 
 	private updateGrid(data: any): void {
-		this.grid = Grid.fromArray(data.grid.cells, data.grid.rows, data.grid.cols);
+		const newgrid = Grid.fromArray<boolean>(data.grid.cells, data.grid.rows, data.grid.cols);
+
+		this.renderer.grid = newgrid;
+		this.grid = newgrid;
+		
 	}
 
 	private handleMsg(event: MessageEvent){
